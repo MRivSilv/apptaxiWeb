@@ -1,9 +1,14 @@
 import { AfterViewInit, Component, ElementRef, OnDestroy, ViewChild, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { firstValueFrom } from 'rxjs';
+import { HttpClient } from '@angular/common/http';
+import { firstValueFrom, Subscription } from 'rxjs';
 import * as L from 'leaflet';
+import {
+  DriverSession,
+  RealtimeLocationService,
+  SessionLocation
+} from './services/realtime-location.service';
 
 interface AuthResponse {
   access_token: string;
@@ -12,23 +17,8 @@ interface AuthResponse {
   role: string;
   email: string;
   full_name: string;
-}
-
-interface SessionLocation {
-  session_id: string;
-  nombre_completo?: string;
-  patente?: string;
   empresa?: string;
-  latitude: number;
-  longitude: number;
-  last_update?: string;
-}
-
-interface DriverSession {
-  session_id: string;
-  nombre_completo?: string;
-  patente?: string;
-  empresa?: string;
+  company?: string;
 }
 
 interface StorageLike {
@@ -45,6 +35,7 @@ interface StorageLike {
 })
 export class App implements AfterViewInit, OnDestroy {
   private readonly http = inject(HttpClient);
+  private readonly realtime = inject(RealtimeLocationService);
   private readonly storage = this.getStorage();
 
   @ViewChild('mapContainer')
@@ -60,7 +51,10 @@ export class App implements AfterViewInit, OnDestroy {
   readonly mapError = signal('');
   readonly authError = signal('');
   readonly adminName = signal(this.storage.getItem('admin_name') || 'Admin Operaciones');
+  readonly adminCompany = signal(this.storage.getItem('admin_company') || 'Empresa no disponible');
   readonly searchTerm = signal('');
+  readonly wsConnected = signal(false);
+  readonly transportMode = signal<'live' | 'fallback'>('fallback');
   readonly selectedSessionId = signal<string | null>(null);
   readonly hoveredSessionId = signal<string | null>(null);
   readonly hoveredPopupPosition = signal<{ left: number; top: number } | null>(null);
@@ -71,19 +65,23 @@ export class App implements AfterViewInit, OnDestroy {
 
   private map?: L.Map;
   private markersLayer = L.layerGroup();
-  private refreshTimer?: ReturnType<typeof setInterval>;
   private hasAutoCentered = false;
+  private boundRealtimeStore = false;
+  private readonly subscriptions = new Subscription();
 
   ngAfterViewInit(): void {
+    this.bindRealtimeStore();
+
     if (this.token()) {
       this.initializeMap();
-      void this.refreshMapData();
-      this.startAutoRefresh();
+      this.scheduleMapResizeRefresh();
+      void this.startRealtimeFlow();
     }
   }
 
   ngOnDestroy(): void {
-    this.clearRefreshTimer();
+    this.subscriptions.unsubscribe();
+    this.realtime.stop();
     this.map?.remove();
   }
 
@@ -112,14 +110,12 @@ export class App implements AfterViewInit, OnDestroy {
       this.storage.setItem('admin_email', response.email);
       this.storage.setItem('api_base_url', baseUrl);
       this.storage.setItem('admin_name', response.full_name || response.email);
+      this.storage.setItem('admin_company', response.empresa || response.company || 'Empresa no disponible');
       this.apiBaseUrl.set(baseUrl);
       this.adminName.set(response.full_name || response.email);
+      this.adminCompany.set(response.empresa || response.company || 'Empresa no disponible');
 
-      queueMicrotask(() => {
-        this.initializeMap();
-        void this.refreshMapData();
-        this.startAutoRefresh();
-      });
+      this.bootMapAfterLogin();
     } catch {
       this.authError.set('No se pudo iniciar sesión. Revisa credenciales o URL del backend.');
     } finally {
@@ -128,15 +124,19 @@ export class App implements AfterViewInit, OnDestroy {
   }
 
   logout(): void {
-    this.clearRefreshTimer();
+    this.realtime.stop();
     this.token.set('');
     this.onlineLocations.set([]);
     this.activeSessions.set([]);
     this.lastRefresh.set(null);
     this.mapError.set('');
+    this.transportMode.set('fallback');
+    this.wsConnected.set(false);
     this.storage.removeItem('admin_token');
     this.storage.removeItem('admin_name');
+    this.storage.removeItem('admin_company');
     this.adminName.set('Admin Operaciones');
+    this.adminCompany.set('Empresa no disponible');
     this.hoveredSessionId.set(null);
     this.hoveredPopupPosition.set(null);
     this.map?.remove();
@@ -158,7 +158,7 @@ export class App implements AfterViewInit, OnDestroy {
 
     this.apiBaseUrl.set(normalized);
     this.storage.setItem('api_base_url', normalized);
-    await this.refreshMapData();
+    await this.startRealtimeFlow();
   }
 
   async refreshMapData(): Promise<void> {
@@ -167,30 +167,9 @@ export class App implements AfterViewInit, OnDestroy {
     }
 
     this.mapLoading.set(true);
-    this.mapError.set('');
-
     try {
-      const headers = this.adminHeaders();
-      const baseUrl = this.normalizeBaseUrl(this.apiBaseUrl());
-      if (!baseUrl) {
-        throw new Error('Missing API base URL');
-      }
-
-      const [locationRaw, activeRaw] = await Promise.all([
-        firstValueFrom(this.http.get<unknown>(`${baseUrl}/location/all/online`, { headers })),
-        firstValueFrom(this.http.get<unknown>(`${baseUrl}/sessions/active`, { headers }))
-      ]);
-
-      const locations = this.parseLocations(locationRaw);
-      const sessions = this.parseSessions(activeRaw);
-
-      this.onlineLocations.set(locations);
-      this.activeSessions.set(sessions);
-      this.lastRefresh.set(new Date());
-      this.syncSelectedSession(locations);
-      this.syncHoveredSession(locations);
-
-      this.drawMarkers(locations);
+      await this.realtime.forceHttpSync(true);
+      this.mapError.set('');
     } catch {
       this.mapError.set('No se pudo actualizar el mapa. Verifica token y disponibilidad del backend.');
     } finally {
@@ -214,32 +193,13 @@ export class App implements AfterViewInit, OnDestroy {
     }
 
     return rows.filter((location) => {
-      const haystack = [
-        location.session_id,
-        location.nombre_completo,
-        location.patente,
-        location.empresa
-      ]
+      const haystack = [location.session_id, location.nombre_completo, location.patente, location.empresa]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
 
       return haystack.includes(term);
     });
-  }
-
-  highlightedLocation(): SessionLocation | undefined {
-    const selected = this.selectedSessionId();
-    const rows = this.onlineLocations();
-    if (!rows.length) {
-      return undefined;
-    }
-
-    if (!selected) {
-      return rows[0];
-    }
-
-    return rows.find((row) => row.session_id === selected) || rows[0];
   }
 
   hoveredLocation(): SessionLocation | undefined {
@@ -304,6 +264,61 @@ export class App implements AfterViewInit, OnDestroy {
     this.showAlert.set(false);
   }
 
+  private bindRealtimeStore(): void {
+    if (this.boundRealtimeStore) {
+      return;
+    }
+
+    this.boundRealtimeStore = true;
+
+    this.subscriptions.add(
+      this.realtime.locations$.subscribe((locations) => {
+        this.onlineLocations.set(locations);
+        this.lastRefresh.set(new Date());
+        this.syncSelectedSession(locations);
+        this.syncHoveredSession(locations);
+        this.drawMarkers(locations);
+      })
+    );
+
+    this.subscriptions.add(
+      this.realtime.activeSessions$.subscribe((sessions) => {
+        this.activeSessions.set(sessions);
+      })
+    );
+
+    this.subscriptions.add(
+      this.realtime.connected$.subscribe((connected) => {
+        this.wsConnected.set(connected);
+      })
+    );
+
+    this.subscriptions.add(
+      this.realtime.transportMode$.subscribe((mode) => {
+        this.transportMode.set(mode);
+      })
+    );
+  }
+
+  private async startRealtimeFlow(): Promise<void> {
+    const baseUrl = this.normalizeBaseUrl(this.apiBaseUrl());
+    const token = this.token();
+    if (!baseUrl || !token) {
+      return;
+    }
+
+    this.mapLoading.set(true);
+    this.mapError.set('');
+
+    try {
+      await this.realtime.start(baseUrl, token);
+    } catch {
+      this.mapError.set('No se pudo iniciar el monitoreo en tiempo real.');
+    } finally {
+      this.mapLoading.set(false);
+    }
+  }
+
   private initializeMap(): void {
     if (!this.mapContainer || this.map) {
       return;
@@ -343,14 +358,17 @@ export class App implements AfterViewInit, OnDestroy {
         fillColor: isSelected ? '#0056d2' : '#1d9bf0',
         fillOpacity: isSelected ? 1 : 0.9
       });
+
       marker.on('mouseover', () => {
         this.hoveredSessionId.set(location.session_id);
         this.repositionHoveredPopup(location);
       });
+
       marker.on('mouseout', () => {
         this.hoveredSessionId.set(null);
         this.hoveredPopupPosition.set(null);
       });
+
       marker.addTo(this.markersLayer);
       points.push([location.latitude, location.longitude]);
     }
@@ -366,207 +384,6 @@ export class App implements AfterViewInit, OnDestroy {
         this.hasAutoCentered = true;
       }
     }
-  }
-
-  private startAutoRefresh(): void {
-    this.clearRefreshTimer();
-    this.refreshTimer = setInterval(() => {
-      void this.refreshMapData();
-    }, 8000);
-  }
-
-  private clearRefreshTimer(): void {
-    if (this.refreshTimer) {
-      clearInterval(this.refreshTimer);
-      this.refreshTimer = undefined;
-    }
-  }
-
-  private adminHeaders(): HttpHeaders {
-    return new HttpHeaders({
-      Authorization: `Bearer ${this.token()}`
-    });
-  }
-
-  private parseLocations(raw: unknown): SessionLocation[] {
-    const rows = this.coerceArray(raw);
-    const result: SessionLocation[] = [];
-    let fallbackIndex = 0;
-
-    for (const row of rows) {
-      const sessionId =
-        this.asText(
-          this.pick(row, [
-            'session_id',
-            'id',
-            'sessionId',
-            'id_sesion',
-            'id_session',
-            'driver_id',
-            'id_conductor'
-          ])
-        ) || `online-${++fallbackIndex}`;
-      const latitude = this.asNumber(
-        this.pickDeep(row, [
-          'latitude',
-          'lat',
-          'y',
-          'location.latitude',
-          'location.lat',
-          'coords.latitude',
-          'coords.lat'
-        ])
-      );
-      const longitude = this.asNumber(
-        this.pickDeep(row, [
-          'longitude',
-          'lng',
-          'lon',
-          'x',
-          'location.longitude',
-          'location.lng',
-          'location.lon',
-          'coords.longitude',
-          'coords.lng',
-          'coords.lon'
-        ])
-      );
-
-      if (latitude === null || longitude === null) {
-        continue;
-      }
-
-      result.push({
-        session_id: sessionId,
-        nombre_completo: this.asText(this.pick(row, ['nombre_completo', 'full_name', 'driver_name'])),
-        patente: this.asText(this.pick(row, ['patente', 'plate'])),
-        empresa: this.asText(this.pick(row, ['empresa', 'company'])),
-        latitude,
-        longitude,
-        last_update: this.asText(this.pick(row, ['last_update', 'updated_at']))
-      });
-    }
-
-    return result;
-  }
-
-  private parseSessions(raw: unknown): DriverSession[] {
-    const rows = this.coerceArray(raw);
-    const result: DriverSession[] = [];
-
-    for (const row of rows) {
-      const sessionId = this.asText(this.pick(row, ['session_id', 'id', 'sessionId']));
-      if (!sessionId) {
-        continue;
-      }
-
-      result.push({
-        session_id: sessionId,
-        nombre_completo: this.asText(this.pick(row, ['nombre_completo', 'full_name', 'driver_name'])),
-        patente: this.asText(this.pick(row, ['patente', 'plate'])),
-        empresa: this.asText(this.pick(row, ['empresa', 'company']))
-      });
-    }
-
-    return result;
-  }
-
-  private coerceArray(value: unknown): Record<string, unknown>[] {
-    if (Array.isArray(value)) {
-      return value.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
-    }
-
-    if (value && typeof value === 'object') {
-      const obj = value as Record<string, unknown>;
-      for (const key of ['items', 'data', 'results', 'sessions', 'locations']) {
-        const nested = obj[key];
-        if (Array.isArray(nested)) {
-          return nested.filter(
-            (item): item is Record<string, unknown> => !!item && typeof item === 'object'
-          );
-        }
-      }
-
-      const objectValues = Object.values(obj).filter(
-        (item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item)
-      );
-      if (objectValues.length) {
-        return objectValues;
-      }
-    }
-
-    return [];
-  }
-
-  private pick(source: unknown, keys: string[]): unknown {
-    if (!source || typeof source !== 'object') {
-      return undefined;
-    }
-
-    const row = source as Record<string, unknown>;
-    for (const key of keys) {
-      if (key in row) {
-        return row[key];
-      }
-    }
-
-    return undefined;
-  }
-
-  private pickDeep(source: unknown, paths: string[]): unknown {
-    for (const path of paths) {
-      const segments = path.split('.');
-      let current: unknown = source;
-      let found = true;
-
-      for (const segment of segments) {
-        if (!current || typeof current !== 'object') {
-          found = false;
-          break;
-        }
-
-        const record = current as Record<string, unknown>;
-        if (!(segment in record)) {
-          found = false;
-          break;
-        }
-
-        current = record[segment];
-      }
-
-      if (found) {
-        return current;
-      }
-    }
-
-    return undefined;
-  }
-
-  private asText(value: unknown): string | undefined {
-    if (typeof value === 'string') {
-      return value;
-    }
-
-    if (typeof value === 'number') {
-      return String(value);
-    }
-
-    return undefined;
-  }
-
-  private asNumber(value: unknown): number | null {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value;
-    }
-
-    if (typeof value === 'string') {
-      const parsed = Number(value);
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-
-    return null;
   }
 
   private getStorage(): StorageLike {
@@ -601,6 +418,37 @@ export class App implements AfterViewInit, OnDestroy {
     }
 
     return value.trim().replace(/\/+$/, '');
+  }
+
+  private bootMapAfterLogin(): void {
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    const tryBoot = () => {
+      attempts += 1;
+
+      if (!this.mapContainer?.nativeElement) {
+        if (attempts < maxAttempts) {
+          setTimeout(tryBoot, 50);
+        }
+        return;
+      }
+
+      this.initializeMap();
+      this.scheduleMapResizeRefresh();
+      void this.startRealtimeFlow();
+    };
+
+    setTimeout(tryBoot, 0);
+  }
+
+  private scheduleMapResizeRefresh(): void {
+    const refresh = () => {
+      this.map?.invalidateSize();
+    };
+
+    setTimeout(refresh, 0);
+    setTimeout(refresh, 120);
   }
 
   private syncSelectedSession(locations: SessionLocation[]): void {

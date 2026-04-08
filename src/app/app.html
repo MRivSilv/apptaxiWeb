@@ -40,7 +40,6 @@
               [ngModel]="password()"
               (ngModelChange)="password.set($event)"
               name="password"
-              placeholder="********"
               required
             />
           </label>
@@ -64,11 +63,10 @@
       <header class="top-nav">
         <div class="top-left">
           <div class="brand-block">
-            <span class="brand">Taxi Precision</span>
+            <span class="brand">{{ adminCompany() }}</span>
             <div class="divider"></div>
-            <span class="hub">Centro Santiago</span>
           </div>
-
+          <!--
           <label class="search-box" aria-label="Buscar taxista">
             <span class="material-symbols-outlined">search</span>
             <input
@@ -79,21 +77,20 @@
               placeholder="Buscar por conductor, patente o sesión"
             />
           </label>
+          -->
+          
         </div>
-
+        
         <div class="top-right">
+          <!--
           <nav>
             <a class="active" href="javascript:void(0)">Mapa en vivo</a>
             <a href="javascript:void(0)">Sesiones</a>
             <a href="javascript:void(0)">Flota</a>
           </nav>
-
+        -->
           <button type="button" class="icon-btn" (click)="refreshMapData()" [disabled]="mapLoading()" aria-label="Refrescar">
             <span class="material-symbols-outlined">sync</span>
-          </button>
-
-          <button type="button" class="icon-btn" aria-label="Historial">
-            <span class="material-symbols-outlined">history</span>
           </button>
 
           <div class="profile">
@@ -230,6 +227,10 @@
                 } @else {
                   Última actualización: {{ lastRefresh() ? (lastRefresh() | date: "HH:mm:ss") : "sin datos" }}
                 }
+              </small>
+              <small>
+                Estado:
+                {{ transportMode() === "live" ? "En vivo (WebSocket)" : "Modo respaldo (HTTP)" }}
               </small>
             </div>
             <button type="button" (click)="dismissAlert()">Cerrar</button>
