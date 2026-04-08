@@ -1,121 +1,255 @@
-<main class="shell">
+<main class="fleet-shell">
   @if (!isLoggedIn) {
-    <section class="card login-card">
-      <h1>Admin Taxi Monitor</h1>
-      <p>Inicia sesión para ver taxistas online en OpenStreetMap.</p>
+    <section class="auth-wrap">
+      <article class="auth-card">
+        <header>
+          <p class="eyebrow">Control de flota</p>
+          <h1>Panel de Monitoreo</h1>
+          <p class="lead">Inicia sesión para supervisar taxistas en línea y telemetría en tiempo real.</p>
+        </header>
 
-      <form (submit)="loginAdmin($event)" class="form-grid">
-        <label>
-          URL backend
-          <input
-            type="text"
-            [ngModel]="apiBaseUrl()"
-            (ngModelChange)="apiBaseUrl.set($event)"
-            name="apiBaseUrl"
-            placeholder="http://127.0.0.1:8000"
-            required
-          />
-        </label>
+        <form (submit)="loginAdmin($event)" class="auth-form">
+          <label>
+            URL backend
+            <input
+              type="text"
+              [ngModel]="apiBaseUrl()"
+              (ngModelChange)="apiBaseUrl.set($event)"
+              name="apiBaseUrl"
+              placeholder="http://127.0.0.1:8000"
+              required
+            />
+          </label>
 
-        <label>
-          Email admin
-          <input
-            type="email"
-            [ngModel]="email()"
-            (ngModelChange)="email.set($event)"
-            name="email"
-            placeholder="admin@example.com"
-            required
-          />
-        </label>
+          <label>
+            Email admin
+            <input
+              type="email"
+              [ngModel]="email()"
+              (ngModelChange)="email.set($event)"
+              name="email"
+              placeholder="admin@example.com"
+              required
+            />
+          </label>
 
-        <label>
-          Contraseña
-          <input
-            type="password"
-            [ngModel]="password()"
-            (ngModelChange)="password.set($event)"
-            name="password"
-            placeholder="********"
-            required
-          />
-        </label>
+          <label>
+            Contraseña
+            <input
+              type="password"
+              [ngModel]="password()"
+              (ngModelChange)="password.set($event)"
+              name="password"
+              required
+            />
+          </label>
 
-        <button type="submit" [disabled]="loading()">
-          @if (loading()) {
-            Entrando...
-          } @else {
-            Iniciar sesión
-          }
-        </button>
-      </form>
+          <button type="submit" [disabled]="loading()">
+            @if (loading()) {
+              Entrando...
+            } @else {
+              Iniciar sesión
+            }
+          </button>
+        </form>
 
-      @if (authError()) {
-        <p class="error">{{ authError() }}</p>
-      }
+        @if (authError()) {
+          <p class="error">{{ authError() }}</p>
+        }
+      </article>
     </section>
   } @else {
-    <section class="dashboard">
-      <header class="topbar card">
-        <div>
-          <h2>Mapa de taxistas en línea</h2>
-          <p>Fuente: <strong>{{ apiBaseUrl() }}</strong></p>
+    <section class="workspace">
+      <header class="top-nav">
+        <div class="top-left">
+          <div class="brand-block">
+            <span class="brand">{{ adminCompany() }}</span>
+            <div class="divider"></div>
+          </div>
+          <!--
+          <label class="search-box" aria-label="Buscar taxista">
+            <span class="material-symbols-outlined">search</span>
+            <input
+              type="text"
+              [ngModel]="searchTerm()"
+              (ngModelChange)="searchTerm.set($event)"
+              name="searchTerm"
+              placeholder="Buscar por conductor, patente o sesión"
+            />
+          </label>
+          -->
+          
         </div>
-        <div class="actions">
-          <button (click)="refreshMapData()" [disabled]="mapLoading()">Refrescar</button>
-          <button class="secondary" (click)="logout()">Cerrar sesión</button>
+        
+        <div class="top-right">
+          <!--
+          <nav>
+            <a class="active" href="javascript:void(0)">Mapa en vivo</a>
+            <a href="javascript:void(0)">Sesiones</a>
+            <a href="javascript:void(0)">Flota</a>
+          </nav>
+        -->
+          <button type="button" class="icon-btn" (click)="refreshMapData()" [disabled]="mapLoading()" aria-label="Refrescar">
+            <span class="material-symbols-outlined">sync</span>
+          </button>
+
+          <div class="profile">
+            <span class="material-symbols-outlined">account_circle</span>
+            <span>{{ adminName() }}</span>
+          </div>
+
+          <button type="button" class="logout" (click)="logout()">Cerrar sesión</button>
         </div>
       </header>
 
-      <div class="content-grid">
-        <section class="card map-card">
-          <form class="inline-form" (submit)="useCurrentSession($event)">
-            <label>
-              URL backend
-              <input
-                type="text"
-                [ngModel]="apiBaseUrl()"
-                (ngModelChange)="apiBaseUrl.set($event)"
-                name="mapApiBaseUrl"
-                required
-              />
-            </label>
-            <button type="submit">Aplicar URL</button>
-          </form>
+      <div class="map-workspace">
+        <div #mapContainer class="map"></div>
+        <div class="map-overlay"></div>
 
-          <div class="status-row">
-            <span>Taxistas con ubicación: {{ onlineLocations().length }}</span>
-            <span>Sesiones activas: {{ activeSessions().length }}</span>
-            <span>
-              Última actualización:
-              {{ lastRefresh() ? (lastRefresh() | date: 'HH:mm:ss') : 'sin datos' }}
-            </span>
+        <aside class="overview-card">
+          <div class="overview-head">
+            <h2>Resumen de Flota</h2>
+            <span class="material-symbols-outlined">analytics</span>
           </div>
 
-          <div #mapContainer class="map"></div>
+          <div class="overview-stats">
+            <article class="highlight">
+              <div>
+                <span class="kicker">Taxistas conectados</span>
+                <strong>{{ onlineLocations().length }} activos</strong>
+              </div>
+              <div class="pill-icon">
+                <span class="material-symbols-outlined">person_pin</span>
+              </div>
+            </article>
 
-          @if (mapError()) {
-            <p class="error">{{ mapError() }}</p>
-          }
-        </section>
+            <div class="mini-grid">
+              <article>
+                <span>En ruta</span>
+                <strong>{{ inTransitCount() }}</strong>
+              </article>
+              <article>
+                <span>Sin reporte</span>
+                <strong>{{ idleCount() }}</strong>
+              </article>
+            </div>
+          </div>
+        </aside>
 
-        <aside class="card list-card">
-          <h3>Taxistas online</h3>
-          @if (!onlineLocations().length) {
-            <p class="muted">Sin ubicaciones reportadas.</p>
+        @if (hoveredLocation(); as hovered) {
+          <article
+            class="asset-popup"
+            [style.left.px]="hoveredPopupPosition()?.left ?? 12"
+            [style.top.px]="hoveredPopupPosition()?.top ?? 12"
+          >
+            <div class="asset-head">
+              <span>Seguimiento Activo</span>
+              <span class="dot"></span>
+            </div>
+            <div class="asset-body">
+              <div class="asset-user">
+                <div class="avatar">
+                  <span class="material-symbols-outlined">local_shipping</span>
+                </div>
+                <div>
+                  <h3>{{ displayName(hovered) }}</h3>
+                  <p>Sesión: {{ hovered.session_id }}</p>
+                </div>
+              </div>
+
+              <dl>
+                <div>
+                  <dt>Patente</dt>
+                  <dd>{{ displayPlate(hovered) }}</dd>
+                </div>
+                <div>
+                  <dt>Empresa</dt>
+                  <dd>{{ hovered.empresa || "Sin empresa" }}</dd>
+                </div>
+              </dl>
+            </div>
+          </article>
+        }
+
+        <aside class="drivers-card">
+          <header>
+            <h3>Taxistas en línea</h3>
+            <small>{{ filteredLocations().length }} visibles</small>
+          </header>
+
+          @if (!filteredLocations().length) {
+            <p class="empty">No hay resultados con el filtro actual.</p>
           } @else {
             <ul>
-              @for (location of onlineLocations(); track location.session_id) {
-                <li>
+              @for (location of filteredLocations(); track location.session_id) {
+                <li
+                  [class.selected]="location.session_id === selectedSessionId()"
+                  (click)="selectLocation(location.session_id)"
+                >
                   <strong>{{ displayName(location) }}</strong>
                   <span>{{ displayPlate(location) }}</span>
-                  <span>{{ location.empresa || 'Sin empresa' }}</span>
-                  <small>{{ location.latitude }}, {{ location.longitude }}</small>
+                  <small>{{ location.empresa || "Sin empresa" }}</small>
                 </li>
               }
             </ul>
           }
         </aside>
+
+        <div class="map-controls">
+          <button type="button" (click)="zoomIn()" aria-label="Acercar">
+            <span class="material-symbols-outlined">add</span>
+          </button>
+          <button type="button" (click)="zoomOut()" aria-label="Alejar">
+            <span class="material-symbols-outlined">remove</span>
+          </button>
+          <div class="separator"></div>
+          <button type="button" (click)="recenterMap()" aria-label="Centrar">
+            <span class="material-symbols-outlined">my_location</span>
+          </button>
+        </div>
+
+        <div class="timeline-rail">
+          <div class="timeline-progress" [style.width.%]="telemetryProgressPercent()">
+            <span></span>
+          </div>
+        </div>
+
+        @if (showAlert()) {
+          <div class="floating-alert">
+            <div class="icon">
+              <span class="material-symbols-outlined">warning</span>
+            </div>
+            <div class="alert-copy">
+              <p>{{ mapError() ? "Alerta de conexión" : "Monitoreo activo" }}</p>
+              <small>
+                @if (mapError()) {
+                  {{ mapError() }}
+                } @else {
+                  Última actualización: {{ lastRefresh() ? (lastRefresh() | date: "HH:mm:ss") : "sin datos" }}
+                }
+              </small>
+              <small>
+                Estado:
+                {{ transportMode() === "live" ? "En vivo (WebSocket)" : "Modo respaldo (HTTP)" }}
+              </small>
+            </div>
+            <button type="button" (click)="dismissAlert()">Cerrar</button>
+          </div>
+        }
+
+        <form class="backend-form" (submit)="useCurrentSession($event)">
+          <label>
+            Backend
+            <input
+              type="text"
+              [ngModel]="apiBaseUrl()"
+              (ngModelChange)="apiBaseUrl.set($event)"
+              name="mapApiBaseUrl"
+              required
+            />
+          </label>
+          <button type="submit">Aplicar</button>
+        </form>
       </div>
     </section>
   }
